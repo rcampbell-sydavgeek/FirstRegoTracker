@@ -18,7 +18,7 @@ How it works
      - A candidate's hex in range -> alert.
      - An Australian-range hex that NO database can name -> low-priority
        "unidentified" alert (could be a brand-new aircraft not yet
-       catalogued). Turn off with ALERT_UNIDENTIFIED=false.
+       catalogued). OFF by default - turn on with ALERT_UNIDENTIFIED=true.
 
 State lives in small JSON files committed back to the repo by the workflow.
 """
@@ -51,7 +51,7 @@ CASA_PAGE_URL = "https://www.casa.gov.au/aircraft/aircraft-registration/data-fil
 # e.g. TEST_REGISTRATION=VH-QPM (any aircraft you know is near Sydney).
 TEST_REGISTRATION = os.environ.get("TEST_REGISTRATION", "").strip().upper()
 
-ALERT_UNIDENTIFIED = os.environ.get("ALERT_UNIDENTIFIED", "true").strip().lower() != "false"
+ALERT_UNIDENTIFIED = os.environ.get("ALERT_UNIDENTIFIED", "false").strip().lower() == "true"
 
 CENTRE_NAME = "Sydney"
 CENTRE_LAT = -33.9461   # YSSY
@@ -84,6 +84,21 @@ HEXDB_AIRCRAFT = "https://hexdb.io/api/v1/aircraft/{hex}"
 ADSBDB_AIRCRAFT = "https://api.adsbdb.com/v0/aircraft/{key}"
 
 HEADERS = {"User-Agent": "syd-new-rego-watcher/1.0"}
+
+# casa.gov.au tends to stall requests that don't look like a browser.
+CASA_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,text/csv,application/zip,*/*;q=0.8",
+    "Accept-Language": "en-AU,en;q=0.9",
+}
+CASA_TIMEOUT = (15, 90)   # (connect, read) seconds
+
+# Manual fallback: if the download fails, a copy of the register committed to
+# the repo root under one of these names is used instead.
+LOCAL_REGISTER_FILES = ["acrftreg.csv", "acrftreg.zip"]
 
 DAY = 86400
 HOUR = 3600
@@ -163,7 +178,7 @@ def send_ntfy(title, message, priority="high", tags="airplane"):
 def discover_register_url():
     if CASA_CSV_URL:
         return CASA_CSV_URL
-    resp = requests.get(CASA_PAGE_URL, headers=HEADERS, timeout=45)
+    resp = requests.get(CASA_PAGE_URL, headers=CASA_HEADERS, timeout=CASA_TIMEOUT)
     resp.raise_for_status()
     links = re.findall(r'href="([^"]*acrftreg[^"]*)"', resp.text, flags=re.I)
     if not links:
@@ -175,17 +190,12 @@ def discover_register_url():
     return urljoin(CASA_PAGE_URL, links[0].replace("&amp;", "&"))
 
 
-def download_register_text():
-    url = discover_register_url()
-    print(f"Downloading CASA register from {url}")
-    resp = requests.get(url, headers=HEADERS, timeout=180)
-    resp.raise_for_status()
-    data = resp.content
+def _decode_register_bytes(data):
     if data[:2] == b"PK":
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
             if not names:
-                raise RuntimeError("Zip from CASA contained no .csv file")
+                raise RuntimeError("Zip contained no .csv file")
             data = zf.read(names[0])
     for enc in ("utf-8-sig", "cp1252"):
         try:
@@ -193,6 +203,22 @@ def download_register_text():
         except UnicodeDecodeError:
             continue
     return data.decode("latin-1")
+
+
+def download_register_text():
+    try:
+        url = discover_register_url()
+        print(f"Downloading CASA register from {url}")
+        resp = requests.get(url, headers=CASA_HEADERS, timeout=CASA_TIMEOUT)
+        resp.raise_for_status()
+        return _decode_register_bytes(resp.content)
+    except Exception as e:
+        for name in LOCAL_REGISTER_FILES:
+            f = Path(name)
+            if f.exists():
+                print(f"CASA download failed ({e}); using local file {name} instead.")
+                return _decode_register_bytes(f.read_bytes())
+        raise
 
 
 def _norm_header(h):
@@ -430,8 +456,6 @@ def main():
     notified = load_json(NOTIFIED_FILE, {})
     hex_checked = load_json(HEX_CHECKED_FILE, {})
 
-    maybe_refresh_register(reg_state, candidates, now)
-
     if TEST_REGISTRATION:
         mark = normalize_mark(TEST_REGISTRATION)
         candidates.setdefault(mark, {
@@ -509,6 +533,10 @@ def main():
                     priority="low", tags="question",
                 )
                 entry["alerted"] = now
+
+    # Daily CASA refresh runs last, so a slow/blocked casa.gov.au can never
+    # delay live alerts. Any new candidates get picked up on the next run.
+    maybe_refresh_register(reg_state, candidates, time.time())
 
     # housekeeping so state files stay small
     for h in [h for h, e in hex_checked.items() if now - e.get("ts", 0) > 60 * DAY]:
