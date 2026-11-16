@@ -51,6 +51,11 @@ CASA_PAGE_URL = "https://www.casa.gov.au/aircraft/aircraft-registration/data-fil
 # e.g. TEST_REGISTRATION=VH-QPM (any aircraft you know is near Sydney).
 TEST_REGISTRATION = os.environ.get("TEST_REGISTRATION", "").strip().upper()
 
+# Set FORCE_REGISTER_REFRESH=true (in watch.yml's env block) to ignore the
+# once-a-day / once-an-hour timers and try the CASA download on every run.
+# Remove it again once the baseline is recorded.
+FORCE_REGISTER_REFRESH = os.environ.get("FORCE_REGISTER_REFRESH", "").strip().lower() == "true"
+
 ALERT_UNIDENTIFIED = os.environ.get("ALERT_UNIDENTIFIED", "false").strip().lower() == "true"
 
 CENTRE_NAME = "Sydney"
@@ -293,10 +298,11 @@ def diff_register(current, reg_state):
 def maybe_refresh_register(reg_state, candidates, now):
     last_ok = reg_state.get("last_check", 0)
     last_try = reg_state.get("last_attempt", 0)
-    if now - last_ok < REGISTER_REFRESH_HOURS * HOUR:
-        return
-    if now - last_try < REGISTER_RETRY_HOURS * HOUR:
-        return
+    if not FORCE_REGISTER_REFRESH:
+        if now - last_ok < REGISTER_REFRESH_HOURS * HOUR:
+            return
+        if now - last_try < REGISTER_RETRY_HOURS * HOUR:
+            return
     reg_state["last_attempt"] = now
     try:
         current = parse_register(download_register_text())
