@@ -32,6 +32,7 @@ jobs:
           CASA_CSV_URL: ${{ secrets.CASA_CSV_URL }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           FORCE_REGISTER_REFRESH: "true"
+          TEST_REGISTRATION: VH-YFF
         run: python watcher.py
 
       - name: Save updated cache/state files
